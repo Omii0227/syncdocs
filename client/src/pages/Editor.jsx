@@ -480,7 +480,7 @@ export default function Editor() {
     clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
       if (socketRef.current) socketRef.current.emit('save-document', { docId, content: value })
-    }, 2000)
+    }, 5000) // 5 seconds instead of 2
   }
 
   function handleTitleSave(newTitle) {

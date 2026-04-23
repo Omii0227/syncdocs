@@ -28,9 +28,23 @@ app.use(express.json());
 
 // In-memory store per document room
 const rooms = {};
+const saveTimers = {}; // debounce timers for MongoDB writes
+
 function getRoom(docId) {
   if (!rooms[docId]) rooms[docId] = { content: '', operationHistory: [], operationCount: 0 };
   return rooms[docId];
+}
+
+// Debounced MongoDB save — fires 1 second after last operation
+function scheduleSave(docId, content) {
+  clearTimeout(saveTimers[docId]);
+  saveTimers[docId] = setTimeout(async () => {
+    try {
+      await Document.findByIdAndUpdate(docId, { content, updatedAt: new Date() });
+    } catch (err) {
+      console.error('[Save] MongoDB write error:', err.message);
+    }
+  }, 1000);
 }
 
 // ─── REDIS SUBSCRIBER — set up ONCE outside socket handler ───────────────────
@@ -244,19 +258,15 @@ io.on('connection', (socket) => {
         // Ack to sender with the (possibly transformed) op + new version
         socket.emit('operation-ack', { ...op, version: room.operationHistory.length - 1 });
 
-        // Persist to MongoDB immediately
-        await Document.findByIdAndUpdate(docId, {
-          content: room.content,
-          updatedAt: new Date(),
-          $push: { operations: { type: op.type, position: op.position, char: op.char, userId, timestamp } },
-        });
+        // Non-blocking debounced save to MongoDB (1s after last op)
+        scheduleSave(docId, room.content);
 
-        // Snapshot every 10 ops
+        // Snapshot every 10 ops (also non-blocking)
         if (room.operationCount % 10 === 0) {
-          await Document.findByIdAndUpdate(docId, {
+          Document.findByIdAndUpdate(docId, {
             $push: { snapshots: { content: room.content, operationCount: room.operationCount, savedAt: new Date() } },
-          });
-          console.log(`[Snapshot] Saved snapshot for doc ${docId} at op ${room.operationCount}`);
+          }).catch((err) => console.error('[Snapshot] error:', err.message));
+          console.log(`[Snapshot] Queued snapshot for doc ${docId} at op ${room.operationCount}`);
         }
 
         // Publish to Redis for other server instances
@@ -294,6 +304,7 @@ io.on('connection', (socket) => {
     try {
       const room = getRoom(docId);
       room.content = content;
+      // Immediate write on explicit save
       await Document.findByIdAndUpdate(docId, { content, updatedAt: new Date() });
       socket.emit('save-ack', { savedAt: new Date().toISOString() });
     } catch (err) {
