@@ -390,8 +390,9 @@ export default function Editor() {
       if (ta) {
         requestAnimationFrame(() => {
           let newStart = selStart, newEnd = selEnd
-          if (op.type === 'insert' && op.position <= selStart) newStart++
-          if (op.type === 'insert' && op.position <= selEnd) newEnd++
+          const insertLen = (op.char || '').length
+          if (op.type === 'insert' && op.position <= selStart) newStart += insertLen
+          if (op.type === 'insert' && op.position <= selEnd) newEnd += insertLen
           if (op.type === 'delete' && op.position < selStart) newStart--
           if (op.type === 'delete' && op.position < selEnd) newEnd--
           ta.setSelectionRange(Math.max(0, newStart), Math.max(0, newEnd))
@@ -424,11 +425,17 @@ export default function Editor() {
     if (isRemoteOp.current) return
     const newValue = e.target.value
     const oldValue = contentRef.current
+
+    // Optimistically update local state immediately for responsiveness
+    contentRef.current = newValue
+    setContent(newValue)
+
+    // Diff to find the operation
     let op = null
     if (newValue.length > oldValue.length) {
       let pos = 0
       while (pos < oldValue.length && oldValue[pos] === newValue[pos]) pos++
-      const char = newValue[pos]
+      const char = newValue[pos] || ''
       op = { type: 'insert', position: pos, char }
       addLog(`[TX] insert("${char}", pos=${pos})`, '#FFEAA7')
     } else if (newValue.length < oldValue.length) {
@@ -437,15 +444,24 @@ export default function Editor() {
       op = { type: 'delete', position: pos, char: '' }
       addLog(`[TX] delete(pos=${pos})`, '#FF6B6B')
     } else {
-      contentRef.current = newValue; setContent(newValue); scheduleSave(newValue); return
+      // No change in length (e.g., selection replace) — just save
+      scheduleSave(newValue)
+      return
     }
-    contentRef.current = newValue
-    setContent(newValue)
+
     if (op && socketRef.current) {
-      socketRef.current.emit('send-operation', { ...op, userId, docId, timestamp: Date.now(), clientVersion: versionRef.current })
+      // Send with current version BEFORE incrementing
+      socketRef.current.emit('send-operation', {
+        ...op,
+        userId,
+        docId,
+        timestamp: Date.now(),
+        clientVersion: versionRef.current,
+      })
       setOpsSynced((n) => n + 1)
       addLog(`[OT] sent to server (v${versionRef.current})`, '#a78bfa')
     }
+
     scheduleSave(newValue)
     setIsTyping(true)
     clearTimeout(typingTimerRef.current)
