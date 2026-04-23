@@ -8,7 +8,11 @@ const subscriber = new Redis(redisUrl, { lazyConnect: true });
 
 publisher.on('connect', () => console.log('[Redis] Publisher connected'));
 subscriber.on('connect', () => console.log('[Redis] Subscriber connected'));
-publisher.on('error', (err) => console.error('[Redis] Publisher error:', err.message));
-subscriber.on('error', (err) => console.error('[Redis] Subscriber error:', err.message));
+publisher.on('error', (err) => {
+  if (!publisher._errorLogged) { console.error('[Redis] Publisher error:', err.message); publisher._errorLogged = true; }
+});
+subscriber.on('error', (err) => {
+  if (!subscriber._errorLogged) { console.error('[Redis] Subscriber error:', err.message); subscriber._errorLogged = true; }
+});
 
 module.exports = { publisher, subscriber };

@@ -7,7 +7,7 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 
 const Document = require('./models/Document');
-const { applyOp } = require('./ot');
+const { applyOp, transformOp } = require('./ot');
 const { publisher, subscriber } = require('./redis');
 
 const app = express();
@@ -170,9 +170,16 @@ io.on('connection', (socket) => {
 
     try {
       const room = getRoom(docId);
-      if (room.content === '' && room.operationHistory.length === 0) {
-        const doc = await Document.findById(docId);
-        if (doc) room.content = doc.content || '';
+
+      // Always fetch fresh content from MongoDB to ensure correct state
+      const doc = await Document.findById(docId);
+      if (doc) {
+        // Only update in-memory if DB has content (prevents overwriting active session)
+        if (doc.content && doc.content.length > room.content.length) {
+          room.content = doc.content;
+        } else if (room.content === '') {
+          room.content = doc.content || '';
+        }
       }
 
       socket.emit('document-state', { content: room.content, operationHistory: room.operationHistory });
@@ -205,16 +212,21 @@ io.on('connection', (socket) => {
     try {
       const room = getRoom(docId);
       const originalPosition = position;
+
+      // clientVersion is the index of the last op the client has seen
+      // Concurrent ops are everything AFTER that index
+      const baseVersion = typeof clientVersion === 'number' ? clientVersion : room.operationHistory.length;
       let op = { type, position, char: char || '', userId, timestamp };
 
-      const concurrentOps = room.operationHistory.slice(clientVersion || 0);
+      // Transform against all ops applied since the client's last known version
+      const concurrentOps = room.operationHistory.slice(baseVersion);
       for (const histOp of concurrentOps) {
-        const { transformOp } = require('./ot');
         op = transformOp(op, histOp);
-        if (op.noOp) break;
+        if (op.noOp || op.type === 'noop') break;
       }
 
-      if (!op.noOp) {
+      if (!op.noOp && op.type !== 'noop') {
+        // Apply to server-side content
         room.content = applyOp(room.content, op);
         room.operationHistory.push(op);
         room.operationCount = (room.operationCount || 0) + 1;
@@ -229,10 +241,10 @@ io.on('connection', (socket) => {
         // Broadcast to local clients on this instance
         socket.to(docId).emit('operation', broadcastOp);
 
-        // Ack to sender
+        // Ack to sender with the (possibly transformed) op + new version
         socket.emit('operation-ack', { ...op, version: room.operationHistory.length - 1 });
 
-        // Persist to MongoDB
+        // Persist to MongoDB immediately
         await Document.findByIdAndUpdate(docId, {
           content: room.content,
           updatedAt: new Date(),
