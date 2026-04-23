@@ -227,9 +227,11 @@ io.on('connection', (socket) => {
       const room = getRoom(docId);
       const originalPosition = position;
 
-      // clientVersion is the index of the last op the client has seen
-      // Concurrent ops are everything AFTER that index
-      const baseVersion = typeof clientVersion === 'number' ? clientVersion : room.operationHistory.length;
+      // clientVersion is what the client had when they sent this op
+      // Concurrent ops = everything applied on server AFTER that version
+      const baseVersion = (typeof clientVersion === 'number' && clientVersion >= 0)
+        ? Math.min(clientVersion, room.operationHistory.length)
+        : room.operationHistory.length;
       let op = { type, position, char: char || '', userId, timestamp };
 
       // Transform against all ops applied since the client's last known version

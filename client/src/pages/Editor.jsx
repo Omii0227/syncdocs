@@ -312,10 +312,11 @@ export default function Editor() {
     })
     socket.on('disconnect', () => setConnected(false))
 
-    socket.on('document-state', ({ content: serverContent }) => {
+    socket.on('document-state', ({ content: serverContent, operationHistory }) => {
       contentRef.current = serverContent
       setContent(serverContent)
-      versionRef.current = 0
+      // Start version at the current history length so we don't re-transform old ops
+      versionRef.current = Array.isArray(operationHistory) ? operationHistory.length : 0
     })
 
     socket.on('room-users', (users) => {
@@ -385,7 +386,10 @@ export default function Editor() {
         if (pos < newContent.length) newContent = newContent.slice(0, pos) + newContent.slice(pos + 1)
       }
       contentRef.current = newContent
-      versionRef.current = op.version !== undefined ? op.version + 1 : versionRef.current + 1
+      // Sync to server version if it's ahead of our local version
+      if (op.version !== undefined && op.version + 1 > versionRef.current) {
+        versionRef.current = op.version + 1
+      }
       setContent(newContent)
       if (ta) {
         requestAnimationFrame(() => {
@@ -403,7 +407,10 @@ export default function Editor() {
     })
 
     socket.on('operation-ack', (op) => {
-      if (!op.noOp && op.version !== undefined) versionRef.current = op.version + 1
+      // Only sync version if server is ahead (handles out-of-order acks)
+      if (!op.noOp && op.version !== undefined && op.version + 1 > versionRef.current) {
+        versionRef.current = op.version + 1
+      }
     })
     socket.on('title-updated', ({ title: t }) => setTitle(t))
     socket.on('document-renamed', ({ newTitle }) => setTitle(newTitle))
@@ -450,7 +457,8 @@ export default function Editor() {
     }
 
     if (op && socketRef.current) {
-      // Send with current version BEFORE incrementing
+      // Send with current version, then increment immediately
+      // so the next keystroke uses the correct version
       socketRef.current.emit('send-operation', {
         ...op,
         userId,
@@ -458,8 +466,9 @@ export default function Editor() {
         timestamp: Date.now(),
         clientVersion: versionRef.current,
       })
+      versionRef.current += 1  // increment immediately, don't wait for ack
       setOpsSynced((n) => n + 1)
-      addLog(`[OT] sent to server (v${versionRef.current})`, '#a78bfa')
+      addLog(`[OT] sent to server (v${versionRef.current - 1})`, '#a78bfa')
     }
 
     scheduleSave(newValue)
