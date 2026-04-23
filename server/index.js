@@ -20,10 +20,28 @@ console.log(`[Server] Instance ID: ${SERVER_ID}`);
 const REDIS_CHANNEL = 'syncdocs:operations';
 
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: {
+    origin: function (origin, callback) {
+      callback(null, true); // allow all origins for WebSocket
+    },
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  transports: ['websocket', 'polling'],
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  upgradeTimeout: 30000,
+  allowUpgrades: true,
 });
 
-app.use(cors({ origin: '*' }));
+app.use(cors({
+  origin: function (origin, callback) {
+    callback(null, true); // allow all origins
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+}));
 app.use(express.json());
 
 // In-memory store per document room
@@ -167,6 +185,17 @@ app.post('/api/documents/:id/restore', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to restore document' });
   }
+});
+
+// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    rooms: io.sockets.adapter.rooms.size,
+    connectedClients: io.engine.clientsCount,
+    serverId: SERVER_ID,
+  });
 });
 
 // ─── SOCKET.IO ───────────────────────────────────────────────────────────────
@@ -375,8 +404,22 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-// ─── START ────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3001;
+// ─── SELF-PING to prevent Render free tier spin-down ─────────────────────────
+const RENDER_URL = process.env.RENDER_URL || '';
+if (RENDER_URL) {
+  setInterval(async () => {
+    try {
+      const res = await fetch(`${RENDER_URL}/health`);
+      const data = await res.json();
+      console.log(`[Ping] Self-ping ok — clients: ${data.connectedClients}`);
+    } catch (err) {
+      console.error('[Ping] Self-ping failed:', err.message);
+    }
+  }, 14 * 60 * 1000); // every 14 minutes
+  console.log(`[Ping] Self-ping enabled for ${RENDER_URL}`);
+}
+
+// ─── START ────────────────────────────────────────────────────────────────────const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/syncdocs';
 
 mongoose

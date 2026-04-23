@@ -303,14 +303,31 @@ export default function Editor() {
   // ── Socket setup ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!userName) return
-    const socket = io(SOCKET_URL, { transports: ['websocket', 'polling'] })
+    const socket = io(SOCKET_URL, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      timeout: 20000,
+      forceNew: false,
+      upgrade: true,
+      autoConnect: true,
+    })
     socketRef.current = socket
 
     socket.on('connect', () => {
+      console.log('[Socket] Connected:', socket.id, '| Transport:', socket.io.engine.transport.name)
       setConnected(true)
       socket.emit('join-document', { docId, userId, userName, userColor })
     })
-    socket.on('disconnect', () => setConnected(false))
+    socket.on('connect_error', (err) => {
+      console.error('[Socket] Connection error:', err.message)
+      setConnected(false)
+    })
+    socket.on('disconnect', (reason) => {
+      console.warn('[Socket] Disconnected:', reason)
+      setConnected(false)
+      if (reason === 'io server disconnect') socket.connect()
+    })
 
     socket.on('document-state', ({ content: serverContent, operationHistory }) => {
       contentRef.current = serverContent

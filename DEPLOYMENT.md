@@ -34,6 +34,7 @@ No same-WiFi required — anyone in the world can collaborate.
    - `MONGODB_URI` = your MongoDB Atlas connection string from Step 1
    - `CLIENT_URL` = leave blank for now (update after frontend deploy)
    - `PORT` = `3001`
+   - `RENDER_URL` = your Render URL (e.g. `https://syncdocs-backend.onrender.com`) — enables self-ping to prevent spin-down
 9. Click **Deploy**
 10. Wait for deploy to finish (2-3 minutes)
 11. Copy your Render URL — looks like: `https://syncdocs-backend.onrender.com`
