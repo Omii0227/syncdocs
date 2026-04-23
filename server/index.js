@@ -419,7 +419,8 @@ if (RENDER_URL) {
   console.log(`[Ping] Self-ping enabled for ${RENDER_URL}`);
 }
 
-// ─── START ────────────────────────────────────────────────────────────────────const PORT = process.env.PORT || 3001;
+// ─── START ────────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/syncdocs';
 
 mongoose
