@@ -56,9 +56,31 @@ function UsernameModal({ onConfirm }) {
 
 // ─── Share Modal ──────────────────────────────────────────────────────────────
 function ShareModal({ onClose }) {
-  const [copied, setCopied] = useState(false)
-  const url = window.location.href
-  function copy() { navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 2000) }
+  const [copied, setCopied] = useState(null)
+  const [networkIp, setNetworkIp] = useState(null)
+
+  const currentUrl = window.location.href
+  const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+
+  // Try to get network IP from server health endpoint
+  useEffect(() => {
+    if (!isLocalhost) return
+    fetch('/api/network-ip')
+      .then(r => r.json())
+      .then(d => { if (d.ip) setNetworkIp(d.ip) })
+      .catch(() => {})
+  }, [])
+
+  const networkUrl = networkIp
+    ? currentUrl.replace(window.location.hostname, networkIp)
+    : null
+
+  function copy(url) {
+    navigator.clipboard.writeText(url)
+    setCopied(url)
+    setTimeout(() => setCopied(null), 2000)
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <div className="bg-[#0f1117] border border-white/10 rounded-2xl w-full max-w-md shadow-2xl">
@@ -66,15 +88,46 @@ function ShareModal({ onClose }) {
           <h2 className="text-white font-semibold">Share Document</h2>
           <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors"><X size={20} /></button>
         </div>
-        <div className="p-5">
-          <p className="text-slate-400 text-sm mb-4">Anyone with this link can edit the document.</p>
-          <div className="flex gap-2">
-            <input readOnly value={url} className="flex-1 px-3 py-2.5 rounded-lg bg-white/5 border border-white/10 text-slate-300 text-sm focus:outline-none" />
-            <button onClick={copy} className="px-4 py-2.5 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors flex items-center gap-2 text-sm font-medium">
-              {copied ? <Check size={14} /> : <Copy size={14} />}{copied ? 'Copied!' : 'Copy'}
-            </button>
+        <div className="p-5 space-y-4">
+          {/* Current URL */}
+          <div>
+            <p className="text-slate-400 text-xs mb-1.5 font-medium">🖥️ Current link</p>
+            <div className="flex gap-2">
+              <input readOnly value={currentUrl}
+                className="flex-1 px-3 py-2.5 rounded-lg bg-white/5 border border-white/10 text-slate-300 text-xs focus:outline-none" />
+              <button onClick={() => copy(currentUrl)}
+                className="px-3 py-2.5 rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors flex items-center gap-1.5 text-xs font-medium flex-shrink-0">
+                {copied === currentUrl ? <Check size={13} /> : <Copy size={13} />}
+                {copied === currentUrl ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
           </div>
-          <p className="text-slate-600 text-xs mt-3">🔗 Share this URL — it's the live collaboration link</p>
+
+          {/* Network URL for WiFi sharing */}
+          {isLocalhost && networkUrl && (
+            <div>
+              <p className="text-slate-400 text-xs mb-1.5 font-medium">📱 Share with devices on same WiFi</p>
+              <div className="flex gap-2">
+                <input readOnly value={networkUrl}
+                  className="flex-1 px-3 py-2.5 rounded-lg bg-white/5 border border-white/10 text-slate-300 text-xs focus:outline-none" />
+                <button onClick={() => copy(networkUrl)}
+                  className="px-3 py-2.5 rounded-lg bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-colors flex items-center gap-1.5 text-xs font-medium flex-shrink-0">
+                  {copied === networkUrl ? <Check size={13} /> : <Copy size={13} />}
+                  {copied === networkUrl ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <p className="text-slate-600 text-xs mt-1">Send this link to anyone on the same WiFi network</p>
+            </div>
+          )}
+
+          {isLocalhost && !networkUrl && (
+            <p className="text-slate-600 text-xs">
+              📱 For WiFi sharing, use your machine's IP address instead of localhost.<br />
+              Check the server terminal for your network IP.
+            </p>
+          )}
+
+          <p className="text-slate-600 text-xs">🔗 Anyone with this link can edit the document in real time</p>
         </div>
       </div>
     </div>

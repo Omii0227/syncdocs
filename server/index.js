@@ -195,6 +195,24 @@ app.get('/health', (req, res) => {
   });
 });
 
+// ─── NETWORK IP — returns local network IP for WiFi sharing ──────────────────
+app.get('/api/network-ip', (req, res) => {
+  const { networkInterfaces } = require('os');
+  const nets = networkInterfaces();
+  let ip = null;
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) {
+        // Prefer 192.168.x.x (WiFi) over VirtualBox adapters
+        if (!ip || net.address.startsWith('192.168.')) {
+          ip = net.address;
+        }
+      }
+    }
+  }
+  res.json({ ip });
+});
+
 // ─── SOCKET.IO ───────────────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
@@ -202,22 +220,29 @@ io.on('connection', (socket) => {
 
   // ── join-document ──────────────────────────────────────────────────────────
   socket.on('join-document', async ({ docId, userId, userName, userColor }) => {
+    console.log(`[JOIN] Socket ${socket.id} | User: ${userName} | DocId: ${docId}`);
+    console.log(`[JOIN] Room size BEFORE join:`, io.sockets.adapter.rooms.get(docId)?.size ?? 0);
+
     // Cancel pending leave timer if this user is reconnecting
-    if (disconnectTimers[userId]) {
-      clearTimeout(disconnectTimers[userId]);
-      delete disconnectTimers[userId];
-      console.log(`[Room] ${userName} reconnected, cancelled leave timer`);
+    const timerKey = `${docId}:${userId}`;
+    if (disconnectTimers[timerKey]) {
+      clearTimeout(disconnectTimers[timerKey]);
+      delete disconnectTimers[timerKey];
+      console.log(`[Room] ${userName} reconnected — leave cancelled`);
     }
 
     // Leave any previous rooms this socket was in (handles reconnects)
     const prevRooms = Array.from(socket.rooms).filter(r => r !== socket.id);
-    prevRooms.forEach(r => socket.leave(r));
+    for (const room of prevRooms) socket.leave(room);
 
     socket.join(docId);
     socket.docId = docId;
     socket.userId = userId;
     socket.userName = userName;
     socket.userColor = userColor;
+
+    console.log(`[JOIN] Room size AFTER join:`, io.sockets.adapter.rooms.get(docId)?.size ?? 0);
+    console.log(`[JOIN] All sockets in room:`, Array.from(io.sockets.adapter.rooms.get(docId) ?? []));
 
     try {
       const room = getRoom(docId);
@@ -263,6 +288,8 @@ io.on('connection', (socket) => {
   // ── send-operation ─────────────────────────────────────────────────────────
   socket.on('send-operation', async ({ type, position, char, userId, docId, timestamp, clientVersion }) => {
     try {
+      console.log(`[OP] Received from ${userId} for doc ${docId}`);
+      console.log(`[OP] Room ${docId} has ${io.sockets.adapter.rooms.get(docId)?.size ?? 0} sockets`);
       const room = getRoom(docId);
       const originalPosition = position;
 
@@ -294,6 +321,7 @@ io.on('connection', (socket) => {
         };
 
         // Broadcast to local clients on this instance
+        console.log(`[OP] Broadcasting to room ${docId}...`);
         socket.to(docId).emit('operation', broadcastOp);
 
         // Ack to sender with the (possibly transformed) op + new version
@@ -386,11 +414,12 @@ io.on('connection', (socket) => {
   // ── disconnect ─────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     const { docId, userId, userName, userColor } = socket;
-    console.log(`[Socket] Disconnected: ${socket.id}`);
+    console.log(`[Socket] Disconnected: ${socket.id} | User: ${userName}`);
     if (!docId || !userId) return;
 
-    // Wait 3 seconds before broadcasting leave — allows reconnects to cancel it
-    disconnectTimers[userId] = setTimeout(() => {
+    // Wait 3 seconds before broadcasting leave — handles page refresh gracefully
+    const timerKey = `${docId}:${userId}`;
+    disconnectTimers[timerKey] = setTimeout(() => {
       io.to(docId).emit('user-leave', { userId, userName, userColor });
       safePublish(REDIS_CHANNEL, JSON.stringify({
         originServerId: SERVER_ID,
@@ -400,8 +429,8 @@ io.on('connection', (socket) => {
         userName,
         userColor,
       }));
-      console.log(`[Room] ${userName} left doc ${docId}`);
-      delete disconnectTimers[userId];
+      console.log(`[Room] ${userName} permanently left doc ${docId}`);
+      delete disconnectTimers[timerKey];
     }, 3000);
   });
 });
