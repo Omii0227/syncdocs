@@ -8,7 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const Document = require('./models/Document');
 const { applyOp, transformOp } = require('./ot');
-const { publisher, subscriber } = require('./redis');
+const { publisher, subscriber, safePublish } = require('./redis');
 
 const app = express();
 const server = http.createServer(app);
@@ -21,32 +21,29 @@ const REDIS_CHANNEL = 'syncdocs:operations';
 
 const io = new Server(server, {
   cors: {
-    origin: function (origin, callback) {
-      callback(null, true); // allow all origins for WebSocket
-    },
+    origin: '*',
     methods: ['GET', 'POST'],
-    credentials: true,
+    credentials: false,
   },
   transports: ['websocket', 'polling'],
-  pingTimeout: 60000,
-  pingInterval: 25000,
+  pingTimeout: 30000,
+  pingInterval: 10000,
   upgradeTimeout: 30000,
   allowUpgrades: true,
 });
 
 app.use(cors({
-  origin: function (origin, callback) {
-    callback(null, true); // allow all origins
-  },
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
+  allowedHeaders: ['Content-Type'],
+  credentials: false,
 }));
 app.use(express.json());
 
 // In-memory store per document room
 const rooms = {};
 const saveTimers = {}; // debounce timers for MongoDB writes
+const disconnectTimers = {}; // delay user-leave to handle reconnects
 
 function getRoom(docId) {
   if (!rooms[docId]) rooms[docId] = { content: '', operationHistory: [], operationCount: 0 };
@@ -205,6 +202,17 @@ io.on('connection', (socket) => {
 
   // ── join-document ──────────────────────────────────────────────────────────
   socket.on('join-document', async ({ docId, userId, userName, userColor }) => {
+    // Cancel pending leave timer if this user is reconnecting
+    if (disconnectTimers[userId]) {
+      clearTimeout(disconnectTimers[userId]);
+      delete disconnectTimers[userId];
+      console.log(`[Room] ${userName} reconnected, cancelled leave timer`);
+    }
+
+    // Leave any previous rooms this socket was in (handles reconnects)
+    const prevRooms = Array.from(socket.rooms).filter(r => r !== socket.id);
+    prevRooms.forEach(r => socket.leave(r));
+
     socket.join(docId);
     socket.docId = docId;
     socket.userId = userId;
@@ -232,19 +240,21 @@ io.on('connection', (socket) => {
 
       const socketsInRoom = await io.in(docId).fetchSockets();
       const users = socketsInRoom
-        .filter((s) => s.userId && s.id !== socket.id)
+        .filter((s) => s.userId && s.id !== socket.id && s.userId !== userId)
         .map((s) => ({ userId: s.userId, userName: s.userName, userColor: s.userColor }));
       socket.emit('room-users', users);
 
       // Publish to Redis so other server instances broadcast too
-      publisher.publish(REDIS_CHANNEL, JSON.stringify({
+      safePublish(REDIS_CHANNEL, JSON.stringify({
         originServerId: SERVER_ID,
         type: 'user-join',
         docId,
         user: { userId, userName, userColor },
       }));
 
-      console.log(`[Room] ${userName} joined doc ${docId}`);
+      console.log(`[Room] ${userName} (${socket.id}) joining doc ${docId}`);
+      console.log(`[Room] Room size after join:`, io.sockets.adapter.rooms.get(docId)?.size);
+      console.log(`[Room] Sending room-users:`, users);
     } catch (err) {
       console.error('[join-document] error:', err);
     }
@@ -301,7 +311,7 @@ io.on('connection', (socket) => {
         }
 
         // Publish to Redis for other server instances
-        publisher.publish(REDIS_CHANNEL, JSON.stringify({
+        safePublish(REDIS_CHANNEL, JSON.stringify({
           originServerId: SERVER_ID,
           type: 'operation',
           docId,
@@ -322,7 +332,7 @@ io.on('connection', (socket) => {
     socket.to(docId).emit('cursor-update', { userId, position, userName, userColor });
 
     // Publish to Redis for other server instances
-    publisher.publish(REDIS_CHANNEL, JSON.stringify({
+    safePublish(REDIS_CHANNEL, JSON.stringify({
       originServerId: SERVER_ID,
       type: 'cursor',
       docId,
@@ -362,7 +372,7 @@ io.on('connection', (socket) => {
       socket.to(docId).emit('document-renamed', { newTitle });
 
       // Publish to Redis for other server instances
-      publisher.publish(REDIS_CHANNEL, JSON.stringify({
+      safePublish(REDIS_CHANNEL, JSON.stringify({
         originServerId: SERVER_ID,
         type: 'rename',
         docId,
@@ -376,12 +386,13 @@ io.on('connection', (socket) => {
   // ── disconnect ─────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     const { docId, userId, userName, userColor } = socket;
-    if (docId && userId) {
-      // Broadcast to local clients on this instance
-      io.to(docId).emit('user-leave', { userId, userName, userColor });
+    console.log(`[Socket] Disconnected: ${socket.id}`);
+    if (!docId || !userId) return;
 
-      // Publish to Redis for other server instances
-      publisher.publish(REDIS_CHANNEL, JSON.stringify({
+    // Wait 3 seconds before broadcasting leave — allows reconnects to cancel it
+    disconnectTimers[userId] = setTimeout(() => {
+      io.to(docId).emit('user-leave', { userId, userName, userColor });
+      safePublish(REDIS_CHANNEL, JSON.stringify({
         originServerId: SERVER_ID,
         type: 'user-leave',
         docId,
@@ -389,10 +400,9 @@ io.on('connection', (socket) => {
         userName,
         userColor,
       }));
-
       console.log(`[Room] ${userName} left doc ${docId}`);
-    }
-    console.log(`[Socket] Disconnected: ${socket.id}`);
+      delete disconnectTimers[userId];
+    }, 3000);
   });
 });
 
@@ -409,14 +419,14 @@ const RENDER_URL = process.env.RENDER_URL || '';
 if (RENDER_URL) {
   setInterval(async () => {
     try {
-      const res = await fetch(`${RENDER_URL}/health`);
-      const data = await res.json();
-      console.log(`[Ping] Self-ping ok — clients: ${data.connectedClients}`);
+      const response = await fetch(`${RENDER_URL}/health`, { method: 'GET' });
+      const data = await response.json();
+      console.log('[Ping] Server alive at:', new Date().toISOString());
     } catch (err) {
-      console.error('[Ping] Self-ping failed:', err.message);
+      console.error('[Ping] Failed:', err.message);
     }
-  }, 14 * 60 * 1000); // every 14 minutes
-  console.log(`[Ping] Self-ping enabled for ${RENDER_URL}`);
+  }, 5 * 60 * 1000); // every 5 minutes
+  console.log('[Ping] Self-ping enabled for:', RENDER_URL);
 }
 
 // ─── START ────────────────────────────────────────────────────────────────────
@@ -427,8 +437,19 @@ mongoose
   .connect(MONGODB_URI)
   .then(() => {
     console.log('[DB] Connected to MongoDB');
-    server.listen(PORT, () => {
-      console.log(`[Server] Running on http://localhost:${PORT}`);
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`[Server] Running on http://0.0.0.0:${PORT}`);
+      console.log(`[Server] Local:   http://localhost:${PORT}`);
+      const { networkInterfaces } = require('os');
+      const nets = networkInterfaces();
+      for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+          if (net.family === 'IPv4' && !net.internal) {
+            console.log(`[Server] Network: http://${net.address}:${PORT}`);
+            console.log(`[Client] Other devices: http://${net.address}:5173`);
+          }
+        }
+      }
     });
   })
   .catch((err) => {

@@ -13,7 +13,9 @@ import { USER_COLORS, generateUserId } from '../utils/colors'
 import { useToasts, ToastContainer } from '../components/Toast'
 import { ConflictCard } from '../components/ConflictCard'
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001'
+const SOCKET_URL = (import.meta.env.VITE_SOCKET_URL && import.meta.env.VITE_SOCKET_URL.trim())
+  ? import.meta.env.VITE_SOCKET_URL.trim()
+  : `http://${window.location.hostname}:3001`
 
 // ─── Typing Dots ──────────────────────────────────────────────────────────────
 function TypingDots() {
@@ -266,6 +268,7 @@ export default function Editor() {
   const versionRef = useRef(0)
 
   const [connected, setConnected] = useState(false)
+  const [connectStatus, setConnectStatus] = useState('connecting') // 'connecting'|'waking'|'waiting'|'live'
   const [saveStatus, setSaveStatus] = useState('saved')
   const [activeUsers, setActiveUsers] = useState([])
   const [otLogs, setOtLogs] = useState([])
@@ -317,15 +320,18 @@ export default function Editor() {
     socket.on('connect', () => {
       console.log('[Socket] Connected:', socket.id, '| Transport:', socket.io.engine.transport.name)
       setConnected(true)
+      setConnectStatus('live')
       socket.emit('join-document', { docId, userId, userName, userColor })
     })
     socket.on('connect_error', (err) => {
       console.error('[Socket] Connection error:', err.message)
       setConnected(false)
+      setConnectStatus('connecting')
     })
     socket.on('disconnect', (reason) => {
       console.warn('[Socket] Disconnected:', reason)
       setConnected(false)
+      setConnectStatus('connecting')
       if (reason === 'io server disconnect') socket.connect()
     })
 
@@ -443,6 +449,14 @@ export default function Editor() {
   useEffect(() => {
     getDocument(docId).then((doc) => { if (doc && doc.title) setTitle(doc.title) }).catch(() => {})
   }, [docId])
+
+  // Escalate connecting message after delays
+  useEffect(() => {
+    if (connected) return
+    const t1 = setTimeout(() => setConnectStatus('waking'), 10000)
+    const t2 = setTimeout(() => setConnectStatus('waiting'), 30000)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [connected])
 
   // ── Handle textarea input (OT) ────────────────────────────────────────────────
   function handleInput(e) {
@@ -630,10 +644,21 @@ export default function Editor() {
 
         {/* Center: connection status */}
         <div className="flex-shrink-0">
-          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border ${connected ? 'bg-green-500/10 border-green-500/30 text-green-400' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-400'}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'}`} />
-            {connected ? 'Live' : 'Connecting...'}
-          </div>
+          {(() => {
+            const statusConfig = {
+              live:       { pill: 'bg-green-500/10 border-green-500/30 text-green-400',   dot: 'bg-green-400 animate-pulse', label: 'Live' },
+              connecting: { pill: 'bg-yellow-500/10 border-yellow-500/30 text-yellow-400', dot: 'bg-yellow-400',             label: 'Connecting...' },
+              waking:     { pill: 'bg-orange-500/10 border-orange-500/30 text-orange-400', dot: 'bg-orange-400',             label: '⏳ Waking up server...' },
+              waiting:    { pill: 'bg-red-500/10 border-red-500/30 text-red-400',          dot: 'bg-red-400',                label: '🔄 Server starting, please wait...' },
+            }
+            const s = statusConfig[connectStatus] || statusConfig.connecting
+            return (
+              <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border ${s.pill}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
+                {s.label}
+              </div>
+            )
+          })()}
         </div>
 
         {/* Right */}
