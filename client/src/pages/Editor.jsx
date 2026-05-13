@@ -432,7 +432,7 @@ export default function Editor() {
     })
 
     socket.on('operation', (op) => {
-      if (op.noOp) return
+      if (op.noOp || op.type === 'noop') return
       addLog(`[RX] ${op.type}("${op.char || ''}", pos=${op.position}) from remote`, '#60a5fa')
       if (op.originalPosition !== undefined && op.originalPosition !== op.position) {
         addConflict(
@@ -523,19 +523,42 @@ export default function Editor() {
 
     // Diff to find the operation
     let op = null
-    if (newValue.length > oldValue.length) {
+    const lengthDiff = newValue.length - oldValue.length
+
+    if (lengthDiff > 1) {
+      // Bulk insert (paste) — sync full content
+      contentRef.current = newValue
+      setContent(newValue)
+      if (socketRef.current) {
+        socketRef.current.emit('save-document', { docId, content: newValue })
+        // Also broadcast as a document-restore so other clients update immediately
+        socketRef.current.emit('bulk-update', { docId, content: newValue, userId })
+      }
+      scheduleSave(newValue)
+      return
+    } else if (lengthDiff < -1) {
+      // Bulk delete (select-all + delete, cut) — sync full content
+      contentRef.current = newValue
+      setContent(newValue)
+      if (socketRef.current) {
+        socketRef.current.emit('save-document', { docId, content: newValue })
+        socketRef.current.emit('bulk-update', { docId, content: newValue, userId })
+      }
+      scheduleSave(newValue)
+      return
+    } else if (lengthDiff === 1) {
       let pos = 0
       while (pos < oldValue.length && oldValue[pos] === newValue[pos]) pos++
       const char = newValue[pos] || ''
       op = { type: 'insert', position: pos, char }
       addLog(`[TX] insert("${char}", pos=${pos})`, '#FFEAA7')
-    } else if (newValue.length < oldValue.length) {
+    } else if (lengthDiff === -1) {
       let pos = 0
       while (pos < newValue.length && oldValue[pos] === newValue[pos]) pos++
       op = { type: 'delete', position: pos, char: '' }
       addLog(`[TX] delete(pos=${pos})`, '#FF6B6B')
     } else {
-      // No change in length (e.g., selection replace) — just save
+      // No change in length (e.g., selection replace same length) — just save
       scheduleSave(newValue)
       return
     }

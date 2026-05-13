@@ -63,20 +63,40 @@ function scheduleSave(docId, content) {
 }
 
 // ─── REDIS SUBSCRIBER — set up ONCE outside socket handler ───────────────────
-subscriber.subscribe(REDIS_CHANNEL, (err) => {
-  if (err) console.error('[Redis] Subscribe error:', err.message);
-  else console.log(`[Redis] Subscribed to channel: ${REDIS_CHANNEL}`);
+subscriber.on('ready', () => {
+  subscriber.subscribe(REDIS_CHANNEL, (err) => {
+    if (err) console.error('[Redis] Subscribe error:', err.message);
+    else console.log(`[Redis] Subscribed to channel: ${REDIS_CHANNEL}`);
+  });
 });
 
-subscriber.on('message', (channel, message) => {
+subscriber.on('message', async (channel, message) => {
   if (channel !== REDIS_CHANNEL) return;
   try {
     const data = JSON.parse(message);
-    // Skip messages published by THIS instance (already broadcast locally)
-    if (data.originServerId === SERVER_ID) return;
+    console.log(`[Redis] Received type:${data.type} from server:${data.originServerId?.slice(0,8)} — mine:${SERVER_ID.slice(0,8)}`);
+    if (data.originServerId === SERVER_ID) {
+      console.log(`[Redis] Skipping own message`);
+      return;
+    }
 
     if (data.type === 'operation') {
+      // Update this server's in-memory room so it stays in sync
+      const room = getRoom(data.docId);
+      const op = data.operation;
+      if (op && !op.noOp && op.type !== 'noop') {
+        room.content = applyOp(room.content, op);
+        room.operationHistory.push(op);
+        room.operationCount = (room.operationCount || 0) + 1;
+      }
       io.to(data.docId).emit('operation', data.operation);
+    }
+    if (data.type === 'bulk') {
+      const room = getRoom(data.docId);
+      room.content = data.content;
+      room.operationHistory = [];
+      room.operationCount = 0;
+      io.to(data.docId).emit('document-restored', { content: data.content });
     }
     if (data.type === 'cursor') {
       io.to(data.docId).emit('cursor-update', data.cursor);
@@ -85,10 +105,26 @@ subscriber.on('message', (channel, message) => {
       io.to(data.docId).emit('document-renamed', { newTitle: data.newTitle });
     }
     if (data.type === 'user-join') {
+      console.log(`[Redis] Forwarding user-join for ${data.user?.userName} to room ${data.docId}`);
       io.to(data.docId).emit('user-join', data.user);
     }
     if (data.type === 'user-leave') {
+      console.log(`[Redis] Forwarding user-leave for ${data.userId} to room ${data.docId}`);
       io.to(data.docId).emit('user-leave', { userId: data.userId, userName: data.userName, userColor: data.userColor });
+    }
+    if (data.type === 'request-users') {
+      // Another server joined — re-announce all our local users in this doc
+      const socketsInDoc = await io.in(data.docId).fetchSockets();
+      for (const s of socketsInDoc) {
+        if (s.userId) {
+          safePublish(REDIS_CHANNEL, JSON.stringify({
+            originServerId: SERVER_ID,
+            type: 'user-join',
+            docId: data.docId,
+            user: { userId: s.userId, userName: s.userName, userColor: s.userColor },
+          }));
+        }
+      }
     }
   } catch (err) {
     console.error('[Redis] Message parse error:', err.message);
@@ -250,11 +286,16 @@ io.on('connection', (socket) => {
       // Always fetch fresh content from MongoDB to ensure correct state
       const doc = await Document.findById(docId);
       if (doc) {
-        // Only update in-memory if DB has content (prevents overwriting active session)
-        if (doc.content && doc.content.length > room.content.length) {
+        // Sync both content AND operation count so version tracking is correct
+        if (doc.content && doc.content.length >= room.content.length) {
           room.content = doc.content;
-        } else if (room.content === '') {
-          room.content = doc.content || '';
+        }
+        // Sync operation count from DB operations array length
+        if (room.operationHistory.length === 0 && doc.operations && doc.operations.length > 0) {
+          room.operationCount = doc.operations.length;
+          // Build a minimal history with just the count so versionRef is correct
+          // We don't need full history — just the length for OT versioning
+          room.operationHistory = new Array(doc.operations.length).fill({ synced: true });
         }
       }
 
@@ -269,13 +310,24 @@ io.on('connection', (socket) => {
         .map((s) => ({ userId: s.userId, userName: s.userName, userColor: s.userColor }));
       socket.emit('room-users', users);
 
-      // Publish to Redis so other server instances broadcast too
+      // Publish this user's join to Redis so other server instances know
       safePublish(REDIS_CHANNEL, JSON.stringify({
         originServerId: SERVER_ID,
         type: 'user-join',
         docId,
         user: { userId, userName, userColor },
       }));
+
+      // Ask other server instances to re-announce their users for this doc
+      // Delay slightly to ensure this socket is fully in the room first
+      setTimeout(() => {
+        safePublish(REDIS_CHANNEL, JSON.stringify({
+          originServerId: SERVER_ID,
+          type: 'request-users',
+          docId,
+          requestingServerId: SERVER_ID,
+        }));
+      }, 500);
 
       console.log(`[Room] ${userName} (${socket.id}) joining doc ${docId}`);
       console.log(`[Room] Room size after join:`, io.sockets.adapter.rooms.get(docId)?.size);
@@ -366,6 +418,25 @@ io.on('connection', (socket) => {
       docId,
       cursor: { userId, position, userName, userColor },
     }));
+  });
+
+  // ── bulk-update (select-all delete, paste, cut) ───────────────────────────
+  socket.on('bulk-update', ({ docId, content, userId }) => {
+    const room = getRoom(docId);
+    room.content = content;
+    room.operationHistory = []; // reset history on bulk update
+    room.operationCount = 0;
+    // Broadcast full content to all OTHER clients on this instance
+    socket.to(docId).emit('document-restored', { content });
+    scheduleSave(docId, content);
+    // Publish to Redis so other server instances sync too
+    safePublish(REDIS_CHANNEL, JSON.stringify({
+      originServerId: SERVER_ID,
+      type: 'bulk',
+      docId,
+      content,
+    }));
+    console.log(`[Bulk] ${userId} bulk-updated doc ${docId} — content length: ${content.length}`);
   });
 
   // ── save-document ──────────────────────────────────────────────────────────

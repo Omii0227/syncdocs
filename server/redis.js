@@ -2,27 +2,24 @@ const Redis = require('ioredis');
 
 const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 
+const retryStrategy = (times) => {
+  if (times > 5) {
+    console.log('[Redis] Cannot connect after 5 tries — running without Redis');
+    return null;
+  }
+  return Math.min(times * 300, 2000);
+};
+
 const publisher = new Redis(redisUrl, {
-  retryStrategy(times) {
-    if (times > 3) {
-      console.log('[Redis] Could not connect after 3 tries — running without Redis');
-      return null; // stop retrying
-    }
-    return Math.min(times * 200, 1000);
-  },
-  lazyConnect: false,
-  enableOfflineQueue: false,
+  retryStrategy,
+  enableOfflineQueue: true,  // allow queuing until connected
+  tls: redisUrl.startsWith('rediss://') ? {} : undefined,
 });
 
 const subscriber = new Redis(redisUrl, {
-  retryStrategy(times) {
-    if (times > 3) {
-      return null;
-    }
-    return Math.min(times * 200, 1000);
-  },
-  lazyConnect: false,
-  enableOfflineQueue: false,
+  retryStrategy,
+  enableOfflineQueue: true,  // allow queuing until connected
+  tls: redisUrl.startsWith('rediss://') ? {} : undefined,
 });
 
 publisher.on('connect', () => console.log('[Redis] Publisher connected ✅'));
@@ -30,7 +27,6 @@ subscriber.on('connect', () => console.log('[Redis] Subscriber connected ✅'));
 publisher.on('error', (err) => console.error('[Redis] Publisher error:', err.message));
 subscriber.on('error', (err) => console.error('[Redis] Subscriber error:', err.message));
 
-// Safe publish — silently skips if Redis is not connected
 function safePublish(channel, message) {
   if (publisher.status === 'ready') {
     publisher.publish(channel, message).catch(() => {});
